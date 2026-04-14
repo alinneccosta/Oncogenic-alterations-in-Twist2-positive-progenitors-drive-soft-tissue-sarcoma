@@ -1,0 +1,734 @@
+
+
+
+=========================================================================
+# PATEL MARKERS ANALYSIS - MYOBLAST, MESENCHYME, MYOCYTE MODULE SCORES
+# =========================================================================
+
+# Load required libraries
+library(Seurat)
+library(openxlsx)
+library(biomaRt)
+library(ggplot2)
+library(ggpubr)
+library(pheatmap)
+library(RColorBrewer)
+library(reshape2)
+library(dplyr)
+library(tidyr)
+library(data.table)
+library(viridis)
+library(stringr)
+
+# =========================================================================
+# STEP 0: INITIAL SETUP AND DATA LOADING
+# =========================================================================
+
+cat("=== PATEL MARKERS ANALYSIS ===\n")
+#saveRDS(tumor, file = file.path(results_dir, "pax7_tumor_score.rds"))
+# Set up paths
+tumor_file <- "/Users/vincentxu/Downloads/Akansha/tumor_subanalysis/pax7_tumor.rds"
+patel_file <- "/Users/vincentxu/Downloads/Alinne/Patel_markers.xlsx"
+results_dir <- "/Users/vincentxu/Downloads/Akansha/tumor_subanalysis/patel_score"
+
+# Create results directory
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
+
+cat("✓ Results directory created:", results_dir, "\n")
+
+# Load tumor data
+cat("Loading tumor data...\n")
+tumor <- readRDS(tumor_file)
+# DefaultAssay(tumor) <- "RNA"  # Use log normalized data instead of SCT
+
+# Check the data
+cat("✓ Tumor data loaded successfully\n")
+cat("Data dimensions:", dim(tumor), "\n")
+cat("Number of clusters:", length(unique(tumor@meta.data$seurat_clusters)), "\n")
+cat("Available assays:", names(tumor@assays), "\n")
+cat("Unique clusters:", sort(unique(tumor@meta.data$seurat_clusters)), "\n")
+
+# Quick overview plot
+p_overview <- DimPlot(tumor, reduction = "umap", group.by = "combined_subclusters", label = TRUE) +
+  ggtitle("Tumor Clusters Overview") +
+  theme_void()
+
+print(p_overview)
+ggsave(file.path(results_dir, "00_tumor_overview.pdf"), p_overview, width = 10, height = 8)
+
+cat("✓ Overview plot created and saved\n")
+
+# =========================================================================
+# STEP 1: GENE CONVERSION FUNCTION SETUP
+# =========================================================================
+
+cat("\n=== STEP 1: GENE CONVERSION SETUP ===\n")
+
+# Gene conversion function from human to mouse
+convertHumanGeneList <- function(x){
+  human = useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+  mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+  
+  genesV2 = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = x , mart = human, attributesL = c("mgi_symbol"), martL = mouse, uniqueRows=T)
+  
+  humanx <- unique(genesV2[, 2])
+  cat("Converted", length(humanx), "out of", length(x), "genes\n")
+  return(humanx)
+}
+
+# Test the conversion function
+test_genes <- c("TP53", "MYC", "GAPDH", "ACTB")
+cat("Testing gene conversion with:", paste(test_genes, collapse = ", "), "\n")
+converted_test <- convertHumanGeneList(test_genes)
+cat("Converted to:", paste(converted_test, collapse = ", "), "\n")
+
+cat("✓ Gene conversion function ready and tested\n")
+
+# =========================================================================
+# STEP 2: LOAD AND EXAMINE PATEL MARKERS
+# =========================================================================
+
+cat("\n=== STEP 2: EXAMINE PATEL MARKERS ===\n")
+
+# Load the Excel file - it has three columns: mesoderm, myoblast, myocyte
+patel_markers <- read.xlsx(patel_file, sheet = 1, colNames = TRUE)
+
+# Examine the structure
+cat("Excel file dimensions:", dim(patel_markers), "\n")
+cat("Column names:", paste(colnames(patel_markers), collapse = ", "), "\n")
+
+# The columns are: mesoderm, myoblast, myocyte
+cell_types <- colnames(patel_markers)
+cat("Found cell types:", paste(cell_types, collapse = ", "), "\n")
+
+# Focus on the three cell types: mesoderm, myoblast, myocyte
+target_types <- c("mesoderm", "myoblast", "myocyte")
+available_types <- intersect(cell_types, target_types)
+
+cat("Target cell types found:", paste(available_types, collapse = ", "), "\n")
+
+# Count genes per cell type
+gene_counts <- data.frame(CellType = character(), Gene_Count = numeric(), stringsAsFactors = FALSE)
+for(cell_type in cell_types) {
+  type_genes <- as.character(patel_markers[[cell_type]])
+  type_genes <- type_genes[!is.na(type_genes) & type_genes != ""]
+  gene_counts <- rbind(gene_counts, data.frame(CellType = cell_type, Gene_Count = length(type_genes)))
+  cat("Cell type", cell_type, "has", length(type_genes), "genes\n")
+}
+
+# Visualize gene counts
+p_gene_counts <- ggplot(gene_counts, aes(x = CellType, y = Gene_Count, fill = CellType)) +
+  geom_bar(stat = "identity") +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Number of Genes per Cell Type (Patel Markers)", 
+       x = "Cell Type", y = "Number of Genes") +
+  geom_text(aes(label = Gene_Count), vjust = -0.5) +
+  theme(legend.position = "none")
+
+print(p_gene_counts)
+ggsave(file.path(results_dir, "01_gene_counts_per_celltype.pdf"), p_gene_counts, width = 12, height = 8)
+
+cat("✓ Patel markers structure examined and visualized\n")
+
+# =========================================================================
+# STEP 3: CONVERT GENES TO MOUSE AND CHECK AVAILABILITY
+# =========================================================================
+
+cat("\n=== STEP 3: CONVERT PATEL GENES ===\n")
+
+# Initialize storage
+patel_mouse_markers <- list()
+conversion_summary <- data.frame(
+  CellType = character(),
+  Human_Genes = numeric(),
+  Mouse_Genes = numeric(),
+  Available_Genes = numeric(),
+  Conversion_Rate = numeric(),
+  Availability_Rate = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Process each cell type
+for(cell_type in cell_types) {
+  cat("Processing", cell_type, "...\n")
+  
+  # Get human genes from the column
+  type_genes <- as.character(patel_markers[[cell_type]])
+  type_genes <- type_genes[!is.na(type_genes) & type_genes != ""]
+  
+  if(length(type_genes) == 0) {
+    cat("  ✗ No genes found, skipping\n")
+    next
+  }
+  
+  # Convert to mouse
+  mouse_genes <- convertHumanGeneList(type_genes)
+  
+  # Check availability in tumor data
+  available_genes <- intersect(mouse_genes, rownames(tumor))
+  patel_mouse_markers[[cell_type]] <- available_genes
+  
+  # Calculate rates
+  conversion_rate <- round(length(mouse_genes) / length(type_genes) * 100, 1)
+  availability_rate <- round(length(available_genes) / length(mouse_genes) * 100, 1)
+  
+  # Add to summary
+  conversion_summary <- rbind(conversion_summary, data.frame(
+    CellType = cell_type,
+    Human_Genes = length(type_genes),
+    Mouse_Genes = length(mouse_genes),
+    Available_Genes = length(available_genes),
+    Conversion_Rate = conversion_rate,
+    Availability_Rate = availability_rate
+  ))
+  
+  cat("  Human:", length(type_genes), "-> Mouse:", length(mouse_genes), 
+      "-> Available:", length(available_genes), "\n")
+}
+
+# Print conversion summary
+print(conversion_summary)
+
+# Filter for cell types with sufficient genes (at least 3)
+valid_cell_types <- names(patel_mouse_markers)[sapply(patel_mouse_markers, function(x) length(x) >= 3)]
+cat("Cell types with sufficient genes:", paste(valid_cell_types, collapse = ", "), "\n")
+
+# Visualize conversion summary
+summary_long <- conversion_summary %>%
+  dplyr::select(CellType, Mouse_Genes, Available_Genes) %>%
+  gather(key = "Type", value = "Count", -CellType) %>%
+  filter(!is.na(Count))
+
+p_conversion <- ggplot(summary_long, aes(x = CellType, y = Count, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Gene Conversion Summary (Patel Markers)", 
+       x = "Cell Type", y = "Number of Genes") +
+  scale_fill_manual(values = c("Mouse_Genes" = "lightblue", "Available_Genes" = "darkblue"))
+
+print(p_conversion)
+ggsave(file.path(results_dir, "02_gene_conversion_summary.pdf"), p_conversion, width = 12, height = 8)
+
+# Save conversion summary
+write.csv(conversion_summary, file.path(results_dir, "gene_conversion_summary.csv"), row.names = FALSE)
+
+cat("✓ Patel genes converted and availability checked\n")
+
+# =========================================================================
+# STEP 4: CALCULATE MODULE SCORES
+# =========================================================================
+
+cat("\n=== STEP 4: CALCULATE MODULE SCORES ===\n")
+
+# Initialize results storage
+module_results <- data.frame()
+
+# Set up distinct colors for cell types using a professional color palette
+cell_type_colors <- c(
+  mesoderm = "#E31A1C",      # Bright red
+  myoblast = "#1F78B4",      # Bright blue  
+  myocyte = "#33A02C"        # Bright green
+)
+
+# Add colors for any other cell types found using a distinct palette
+extra_types <- setdiff(valid_cell_types, names(cell_type_colors))
+if(length(extra_types) > 0) {
+  # Use ColorBrewer Set1 palette for additional colors
+  extra_colors <- RColorBrewer::brewer.pal(min(9, max(3, length(extra_types))), "Set1")[1:length(extra_types)]
+  names(extra_colors) <- extra_types
+  cell_type_colors <- c(cell_type_colors, extra_colors)
+  cat("Added colors for extra cell types:", paste(extra_types, collapse = ", "), "\n")
+}
+
+# Process each valid cell type
+for(cell_type in valid_cell_types) {
+  available_genes <- patel_mouse_markers[[cell_type]]
+  cat("Processing", cell_type, "with", length(available_genes), "genes\n")
+  
+  # Calculate average expression per cluster using RNA assay
+  avg_expr <- AverageExpression(tumor, features = available_genes, 
+                                group.by = "combined_subclusters", assays = "RNA", slot = "data")
+  expr_matrix <- as.matrix(avg_expr$RNA)
+  cluster_scores <- colMeans(expr_matrix, na.rm = TRUE)
+  
+  # Normalize and log transform
+  min_score <- min(cluster_scores, na.rm = TRUE)
+  normalized_scores <- (cluster_scores - min_score) + 1
+  log_scores <- log10(normalized_scores)
+  
+  # Store results
+  type_results <- data.frame(
+    CellType = cell_type,
+    Cluster = names(cluster_scores),
+    ModuleScore = log_scores,
+    RawScore = cluster_scores,
+    NormalizedExpression = cluster_scores,
+    stringsAsFactors = FALSE
+  )
+  
+  module_results <- rbind(module_results, type_results)
+  cat("  ✓ Added", nrow(type_results), "entries\n")
+}
+
+# Prepare data for plotting
+module_results$Cluster_num <- as.numeric(gsub("^g", "", module_results$Cluster))
+module_results <- module_results[!is.na(module_results$Cluster_num), ]
+
+cat("Module scores calculated for", nrow(module_results), "cluster-celltype combinations\n")
+
+# =========================================================================
+# STEP 5: CREATE VISUALIZATIONS
+# =========================================================================
+
+cat("\n=== STEP 5: CREATE VISUALIZATIONS ===\n")
+
+# Create barplot with distinct colors
+cluster_colors <- RColorBrewer::brewer.pal(min(11, max(3, length(unique(module_results$Cluster)))), "Spectral")
+if(length(unique(module_results$Cluster)) > 11) {
+  cluster_colors <- rainbow(length(unique(module_results$Cluster)))
+}
+
+p_module_bar <- ggplot(module_results, aes(x = CellType, y = ModuleScore, fill = Cluster)) + 
+  geom_bar(position = position_dodge(0.9), stat = "identity") +
+  scale_fill_manual(values = cluster_colors) +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12)) +
+  labs(title = "Patel Cell Type Module Scores by Cluster", 
+       x = "Cell Type", y = "Module Score (log10)", fill = "Cluster")
+
+print(p_module_bar)
+ggsave(file.path(results_dir, "03_module_scores_barplot.pdf"), p_module_bar, width = 12, height = 8)
+
+# Line plots removed - not helpful for this analysis
+
+# Create faceted barplot - LOG TRANSFORMED MODULE SCORES
+n_types <- length(unique(module_results$CellType))
+n_cols <- max(1, min(3, ceiling(sqrt(n_types))))
+
+p_module_faceted_log <- ggplot(module_results, aes(x = Cluster, y = ModuleScore, fill = CellType)) + 
+  geom_col() + 
+  scale_fill_manual(values = cell_type_colors) + 
+  facet_wrap(CellType ~ ., scales = "free_y", ncol = n_cols) +
+  theme_pubr() +
+  theme(legend.position = "none") +
+  labs(title = "Module Scores by Cluster - Log Transformed", 
+       x = "Cluster", y = "Module Score (log10 transformed)")
+
+print(p_module_faceted_log)
+ggsave(file.path(results_dir, "03_module_scores_faceted_log.pdf"), p_module_faceted_log, width = 12, height = 8)
+
+# Create faceted barplot - RAW NORMALIZED EXPRESSION SCORES  
+p_module_faceted_raw <- ggplot(module_results, aes(x = Cluster, y = NormalizedExpression, fill = CellType)) + 
+  geom_col() + 
+  scale_fill_manual(values = cell_type_colors) + 
+  facet_wrap(CellType ~ ., scales = "free_y", ncol = n_cols) +
+  theme_pubr() +
+  theme(legend.position = "none") +
+  labs(title = "Module Scores by Cluster - Raw Normalized Expression", 
+       x = "Cluster", y = "Mean Normalized Expression (not log transformed)")
+
+print(p_module_faceted_raw)
+ggsave(file.path(results_dir, "03_module_scores_faceted_raw.pdf"), p_module_faceted_raw, width = 12, height = 8)
+
+
+
+# Line plots removed - faceted plots are more informative
+
+cat("✓ Main visualizations created\n")
+
+# =========================================================================
+# STEP 6: CREATE FEATURE PLOTS
+# =========================================================================
+
+cat("\n=== STEP 6: CREATE FEATURE PLOTS ===\n")
+
+# Create feature plots for each valid cell type
+for(cell_type in valid_cell_types) {
+  cat("Creating feature plot for", cell_type, "...\n")
+  
+  available_genes <- patel_mouse_markers[[cell_type]]
+  
+  # Add module score to tumor object using RNA assay
+  tumor <- AddModuleScore(tumor, features = list(available_genes), 
+                          name = paste0(cell_type, "_Patel_Score"), assay = "RNA")
+  score_column <- paste0(cell_type, "_Patel_Score1")
+  
+  # Create feature plot with inverse viridis colors
+  p_feature <- FeaturePlot(tumor, features = score_column, reduction = "umap", 
+                           pt.size = 0.5, cols = rev(viridis::viridis(100))) +
+    ggtitle(paste("Module Score:", cell_type, "(Patel Markers)")) +
+    theme_void()
+  
+  print(p_feature)
+  ggsave(file.path(results_dir, paste0("05_", cell_type, "_feature_plot.pdf")), 
+         p_feature, width = 10, height = 8)
+  
+  cat("  ✓ Feature plot saved for", cell_type, "\n")
+}
+
+cat("✓ All feature plots created\n")
+
+
+
+
+####addendum plot:
+# Get all the Patel score columns that were created
+patel_score_columns <- paste0(valid_cell_types, "_Patel_Score1")
+available_patel_scores <- patel_score_columns[patel_score_columns %in% colnames(tumor@meta.data)]
+
+cat("Available Patel scores:", length(available_patel_scores), "\n")
+cat("Score columns:", paste(available_patel_scores, collapse = ", "), "\n")
+
+
+
+
+# Create individual feature plots
+for(i in 1:length(available_patel_scores)) {
+  score_col <- available_patel_scores[i]
+  cell_type_name <- gsub("_Patel_Score1$", "", score_col)
+  
+  cat("Creating feature plot for", cell_type_name, "...\n")
+  
+  p_feature <- FeaturePlot(tumor, reduction = "umap", pt.size = 0.1,
+                           features = score_col, order = TRUE) +
+    scale_color_distiller(palette = "RdYlBu") + 
+    coord_fixed() +
+    ggtitle(paste("Patel Markers Module Score:", cell_type_name)) +
+    theme_classic()
+  
+  print(p_feature)
+  ggsave(file.path(results_dir, paste0("06_", cell_type_name, "_patel_feature_plot.pdf")), 
+         p_feature, width = 8, height = 6)
+  
+  cat("  ✓ Feature plot saved for", cell_type_name, "\n")
+}
+
+# Create combined feature plot (similar to the reference style)
+if(length(available_patel_scores) > 1) {
+  cat("Creating combined feature plot...\n")
+  
+  p_combined <- FeaturePlot(tumor, reduction = "umap", pt.size = 0.1,
+                            features = available_patel_scores, order = TRUE) &
+    scale_color_distiller(palette = "RdYlBu") & coord_fixed() &
+    theme_classic()
+  
+  print(p_combined)
+  
+  # Calculate grid dimensions for better layout
+  n_plots <- length(available_patel_scores)
+  n_cols_grid <- min(4, n_plots)  # Maximum 4 columns
+  n_rows_grid <- ceiling(n_plots / n_cols_grid)
+  
+  ggsave(file.path(results_dir, "06_combined_patel_feature_plots.pdf"), 
+         p_combined, width = n_cols_grid * 4, height = n_rows_grid * 4)
+  
+  cat("  ✓ Combined feature plot saved with", n_plots, "panels\n")
+}
+
+cat("✓ All Patel marker feature plots created\n")
+
+# Optional: Create a summary table of the scores
+cat("\n=== SUMMARY OF PATEL MODULE SCORES ===\n")
+score_summary <- data.frame()
+for(score_col in available_patel_scores) {
+  cell_type_name <- gsub("_Patel_Score1$", "", score_col)
+  scores <- tumor@meta.data[[score_col]]
+  
+  summary_row <- data.frame(
+    CellType = cell_type_name,
+    ScoreColumn = score_col,
+    Mean = round(mean(scores, na.rm = TRUE), 3),
+    Median = round(median(scores, na.rm = TRUE), 3),
+    Min = round(min(scores, na.rm = TRUE), 3),
+    Max = round(max(scores, na.rm = TRUE), 3),
+    SD = round(sd(scores, na.rm = TRUE), 3),
+    stringsAsFactors = FALSE
+  )
+  
+  score_summary <- rbind(score_summary, summary_row)
+}
+
+print(score_summary)
+
+# Save summary table
+write.csv(score_summary, file.path(results_dir, "06_patel_scores_summary.csv"), row.names = FALSE)
+cat("✓ Summary table saved\n")
+
+
+
+
+
+
+
+
+
+# =========================================================================
+# STEP 6B: EXTRACT SEURAT MODULE SCORES PER CLUSTER
+# =========================================================================
+
+cat("\n=== STEP 6B: EXTRACT SEURAT MODULE SCORES PER CLUSTER ===\n")
+
+# Extract Seurat module scores for each cluster
+seurat_module_results <- data.frame()
+
+for(cell_type in valid_cell_types) {
+  score_column <- paste0(cell_type, "_Patel_Score1")
+  
+  if(score_column %in% colnames(tumor@meta.data)) {
+    cat("Extracting Seurat scores for", cell_type, "...\n")
+    
+    # Calculate average Seurat module score per cluster
+    cluster_seurat_scores <- aggregate(tumor@meta.data[[score_column]], 
+                                       by = list(cluster = tumor@meta.data$seurat_clusters), 
+                                       FUN = mean, na.rm = TRUE)
+    
+    # Create data frame
+    seurat_results <- data.frame(
+      CellType = cell_type,
+      Cluster = cluster_seurat_scores$cluster,
+      SeuratModuleScore = cluster_seurat_scores$x,
+      stringsAsFactors = FALSE
+    )
+    
+    seurat_module_results <- rbind(seurat_module_results, seurat_results)
+    cat("  ✓ Added", nrow(seurat_results), "entries\n")
+  } else {
+    cat("  ✗ Score column", score_column, "not found\n")
+  }
+}
+
+# Prepare data for plotting
+seurat_module_results$Cluster_num <- as.numeric(gsub("^g", "", seurat_module_results$Cluster))
+seurat_module_results <- seurat_module_results[!is.na(seurat_module_results$Cluster_num), ]
+
+cat("Seurat module scores extracted for", nrow(seurat_module_results), "cluster-celltype combinations\n")
+
+# Create faceted barplot - SEURAT MODULE SCORES
+p_module_faceted_seurat <- ggplot(seurat_module_results, aes(x = Cluster, y = SeuratModuleScore, fill = CellType)) + 
+  geom_col() + 
+  scale_fill_manual(values = cell_type_colors) + 
+  facet_wrap(CellType ~ ., scales = "free_y", ncol = n_cols) +
+  theme_pubr() +
+  theme(legend.position = "none") +
+  labs(title = "Module Scores by Cluster - Seurat AddModuleScore Method", 
+       x = "Cluster", y = "Seurat Module Score (with control genes)")
+
+print(p_module_faceted_seurat)
+ggsave(file.path(results_dir, "03_module_scores_faceted_seurat.pdf"), p_module_faceted_seurat, width = 12, height = 8)
+
+
+
+
+
+
+####addendum plots:
+# =========================================================================
+# STEP 6C: CREATE INDIVIDUAL AND COMBINED FEATURE PLOTS FOR PATEL MARKERS
+# =========================================================================
+cat("\n=== STEP 6C: CREATE INDIVIDUAL AND COMBINED FEATURE PLOTS ===\n")
+
+# Get all the Patel score columns that were created
+patel_score_columns <- paste0(valid_cell_types, "_Patel_Score1")
+available_patel_scores <- patel_score_columns[patel_score_columns %in% colnames(tumor@meta.data)]
+
+cat("Available Patel scores:", length(available_patel_scores), "\n")
+cat("Score columns:", paste(available_patel_scores, collapse = ", "), "\n")
+
+# Create individual feature plots
+for(i in 1:length(available_patel_scores)) {
+  score_col <- available_patel_scores[i]
+  cell_type_name <- gsub("_Patel_Score1$", "", score_col)
+  
+  cat("Creating feature plot for", cell_type_name, "...\n")
+  
+  p_feature <- FeaturePlot(tumor, reduction = "umap", pt.size = 0.1,
+                           features = score_col, order = TRUE) +
+    scale_color_distiller(palette = "RdYlBu") + 
+    coord_fixed() +
+    ggtitle(paste("Patel Markers Module Score:", cell_type_name)) +
+    theme_classic()
+  
+  print(p_feature)
+  ggsave(file.path(results_dir, paste0("06_", cell_type_name, "_patel_feature_plot.pdf")), 
+         p_feature, width = 8, height = 6)
+  
+  cat("  ✓ Feature plot saved for", cell_type_name, "\n")
+}
+
+# Create combined feature plot (similar to the reference style)
+if(length(available_patel_scores) > 1) {
+  cat("Creating combined feature plot...\n")
+  
+  p_combined <- FeaturePlot(tumor, reduction = "umap", pt.size = 0.1,
+                            features = available_patel_scores, order = TRUE) &
+    scale_color_distiller(palette = "RdYlBu") & coord_fixed() &
+    theme_classic()
+  
+  print(p_combined)
+  
+  # Calculate grid dimensions for better layout
+  n_plots <- length(available_patel_scores)
+  n_cols_grid <- min(2, n_plots)  # Maximum 4 columns
+  n_rows_grid <- ceiling(n_plots / n_cols_grid)
+  
+  ggsave(file.path(results_dir, "06_combined_patel_feature_plots.pdf"), 
+         p_combined, width = n_cols_grid * 2, height = n_rows_grid * 2)
+  
+  cat("  ✓ Combined feature plot saved with", n_plots, "panels\n")
+}
+
+cat("✓ All Patel marker feature plots created\n")
+
+# Optional: Create a summary table of the scores
+cat("\n=== SUMMARY OF PATEL MODULE SCORES ===\n")
+score_summary <- data.frame()
+for(score_col in available_patel_scores) {
+  cell_type_name <- gsub("_Patel_Score1$", "", score_col)
+  scores <- tumor@meta.data[[score_col]]
+  
+  summary_row <- data.frame(
+    CellType = cell_type_name,
+    ScoreColumn = score_col,
+    Mean = round(mean(scores, na.rm = TRUE), 3),
+    Median = round(median(scores, na.rm = TRUE), 3),
+    Min = round(min(scores, na.rm = TRUE), 3),
+    Max = round(max(scores, na.rm = TRUE), 3),
+    SD = round(sd(scores, na.rm = TRUE), 3),
+    stringsAsFactors = FALSE
+  )
+  
+  score_summary <- rbind(score_summary, summary_row)
+}
+
+print(score_summary)
+
+# Save summary table
+write.csv(score_summary, file.path(results_dir, "06_patel_scores_summary.csv"), row.names = FALSE)
+cat("✓ Summary table saved\n")
+
+
+
+# final_obj_path <- file.path(results_dir, "tpmt_patel_score.rds")
+# saveRDS(tumor, final_obj_path)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# =========================================================================
+# STEP 8: SAVE RESULTS AND SUMMARY
+# =========================================================================
+
+cat("\n=== STEP 8: SAVE RESULTS ===\n")
+
+# Save module scores
+write.csv(module_results, file.path(results_dir, "patel_module_scores.csv"), row.names = FALSE)
+write.csv(seurat_module_results, file.path(results_dir, "patel_seurat_module_scores.csv"), row.names = FALSE)
+
+# Create comprehensive summary table with both scoring methods
+cluster_summary <- module_results %>%
+  group_by(Cluster) %>%
+  summarise(
+    Cluster = first(Cluster),
+    Mesoderm_Score_Custom = ifelse("mesoderm" %in% Cluster, ModuleScore[CellType == "mesoderm"], NA),
+    Myoblast_Score_Custom = ifelse("myoblast" %in% Cluster, ModuleScore[CellType == "myoblast"], NA),
+    Myocyte_Score_Custom = ifelse("myocyte" %in% Cluster, ModuleScore[CellType == "myocyte"], NA),
+    .groups = 'drop'
+  ) %>%
+  arrange(Cluster)
+
+# Add Seurat scores to summary
+seurat_summary <- seurat_module_results %>%
+  group_by(Cluster_num) %>%
+  summarise(
+    Mesoderm_Score_Seurat = ifelse("mesoderm" %in% CellType, SeuratModuleScore[CellType == "mesoderm"], NA),
+    Myoblast_Score_Seurat = ifelse("myoblast" %in% CellType, SeuratModuleScore[CellType == "myoblast"], NA),
+    Myocyte_Score_Seurat = ifelse("myocyte" %in% CellType, SeuratModuleScore[CellType == "myocyte"], NA),
+    .groups = 'drop'
+  ) %>%
+  arrange(Cluster_num)
+
+# Merge both scoring methods
+cluster_summary <- merge(cluster_summary, seurat_summary, by = "Cluster", all = TRUE)
+
+# Fill in missing values for custom scores
+available_cell_types_in_results <- unique(module_results$CellType)
+for(cell_type in c("mesoderm", "myoblast", "myocyte")) {
+  if(cell_type %in% available_cell_types_in_results) {
+    cell_type_data <- module_results[module_results$CellType == cell_type, ]
+    col_name <- paste0(stringr::str_to_title(cell_type), "_Score_Custom")
+    if(col_name %in% colnames(cluster_summary)) {
+      for(i in 1:nrow(cluster_summary)) {
+        cluster_num <- cluster_summary$Cluster_num[i]
+        matching_row <- cell_type_data[cell_type_data$Cluster_num == cluster_num, ]
+        if(nrow(matching_row) > 0) {
+          cluster_summary[[col_name]][i] <- matching_row$ModuleScore[1]
+        }
+      }
+    }
+  }
+}
+
+# Fill in missing values for Seurat scores
+available_cell_types_seurat <- unique(seurat_module_results$CellType)
+for(cell_type in c("mesoderm", "myoblast", "myocyte")) {
+  if(cell_type %in% available_cell_types_seurat) {
+    cell_type_data <- seurat_module_results[seurat_module_results$CellType == cell_type, ]
+    col_name <- paste0(stringr::str_to_title(cell_type), "_Score_Seurat")
+    if(col_name %in% colnames(cluster_summary)) {
+      for(i in 1:nrow(cluster_summary)) {
+        cluster_num <- cluster_summary$Cluster_num[i]
+        matching_row <- cell_type_data[cell_type_data$Cluster_num == cluster_num, ]
+        if(nrow(matching_row) > 0) {
+          cluster_summary[[col_name]][i] <- matching_row$SeuratModuleScore[1]
+        }
+      }
+    }
+  }
+}
+
+print(cluster_summary)
+write.csv(cluster_summary, file.path(results_dir, "cluster_summary_scores.csv"), row.names = FALSE)
+
+
+
+
+# Print final summary
+cat("\n========================================\n")
+cat("PATEL MARKERS ANALYSIS COMPLETE!\n")
+cat("========================================\n")
+cat("Processed cell types:", paste(valid_cell_types, collapse = ", "), "\n")
+cat("Total clusters analyzed:", length(unique(module_results$Cluster_num)), "\n")
+cat("Scoring methods: Custom + Seurat AddModuleScore\n")
+cat("Results directory:", results_dir, "\n")
+cat("========================================\n")
+
+# Print top clusters for each cell type (both scoring methods)
+cat("\nTOP CLUSTERS BY CUSTOM SCORING:\n")
+for(cell_type in valid_cell_types) {
+  cell_data <- module_results[module_results$CellType == cell_type, ]
+  top_cluster <- cell_data[which.max(cell_data$ModuleScore), ]
+  cat("Highest", cell_type, "score: Cluster", top_cluster$Cluster_num, 
+      "with score", round(top_cluster$ModuleScore, 3), "\n")
+}
+
+cat("\nTOP CLUSTERS BY SEURAT SCORING:\n")
+for(cell_type in valid_cell_types) {
+  cell_data <- seurat_module_results[seurat_module_results$CellType == cell_type, ]
+  top_cluster <- cell_data[which.max(cell_data$SeuratModuleScore), ]
+  cat("Highest", cell_type, "score: Cluster", top_cluster$Cluster_num, 
+      "with score", round(top_cluster$SeuratModuleScore, 3), "\n")
+}
