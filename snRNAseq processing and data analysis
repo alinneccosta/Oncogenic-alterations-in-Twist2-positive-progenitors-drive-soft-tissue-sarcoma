@@ -1,0 +1,141 @@
+Sys.setenv(http_proxy="http://proxy.swmed.edu:3128")
+Sys.setenv(https_proxy="http://proxy.swmed.edu:3128")
+#snRNAseq processing and data analysis
+#Author Maria Gabriela Morales
+
+library(ComplexHeatmap)
+library(Seurat)
+library(SoupX)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(conflicted)
+library(infercnv)
+library(circlize)
+library(patchwork)
+
+
+DimPlot(object = ACC_S4_YFP, reduction = "umap", group.by = "ori.id", label = FALSE)
+DimPlot(ACC_S4_YFP, reduction = "umap", label = FALSE)  + scale_y_reverse()
+DimPlot(ACC_S4_YFP, reduction = "umap", label = TRUE)  + scale_y_reverse()
+DefaultAssay(ACC_S4_YFP) <- "RNA"
+FeaturePlot(ACC_S4_YFP, features = c("Cd3g")) + scale_y_reverse()
+VlnPlot(ACC_S4_YFP, features = c("Fap"), ncol = 2, pt.size = 0) + NoLegend()
+
+
+
+# Individual sample analysis with SoupX
+
+#Step 1: MAD (Median Absolute Deviation) Outlier Detection
+#This function identifies outliers in a given metric (like log1p_total_counts, percent.mt, etc.) using the Median Absolute Deviation (MAD).
+#MAD is used to assess variability, and this function flags values that are more than nmads times away from the median as outliers.
+#It returns a logical vector indicating whether each value is an outlier or not.
+mad_outlier <- function(sobj, metric, nmads){
+  M <- sobj@meta.data[[metric]]
+  median_M <- median(M, na.rm = TRUE)
+  mad_M <- mad(M, na.rm = TRUE)
+  outlier <- (M < (median_M - nmads * mad_M)) | (M > (median_M + nmads * mad_M))
+  return(outlier)
+}
+
+#Step 2: Processing an Individual Sample
+# Processing the 'ACC_S4' sample
+sample_id <- 'ACC_S4_YFP'
+path <- file.path(getwd(), sample_id, "filtered_feature_bc_matrix")
+message("Checking path: ", path)
+
+if (!dir.exists(path)) {
+  warning("Directory does not exist: ", path)
+  return(NULL)
+}
+
+sobj <- Read10X(data.dir = path)
+sobj <- CreateSeuratObject(counts = sobj, min.cells = 3, min.features = 200)
+sobj$sample_id <- sample_id
+
+# Add QC metrics
+sobj$log1p_total_counts <- log1p(sobj@meta.data$nCount_RNA)
+sobj$log1p_n_genes_by_counts <- log1p(sobj@meta.data$nFeature_RNA)
+sobj[["percent.mt"]] <- PercentageFeatureSet(sobj, pattern = "^mt-")
+sobj[["percent.ribo"]] <- PercentageFeatureSet(sobj, pattern = "^Rpl|Rps")
+
+# Filter using MAD outlier detection
+bool_vector <- !mad_outlier(sobj, 'log1p_total_counts', 5) & 
+  !mad_outlier(sobj, 'log1p_n_genes_by_counts', 5) &
+  !mad_outlier(sobj, 'percent.mt', 10) & 
+  !mad_outlier(sobj, 'percent.ribo', 10)
+
+sobj <- subset(sobj, cells = which(bool_vector))
+
+# Perform clustering and other steps as below
+sobj <- NormalizeData(sobj, verbose = FALSE)
+sobj <- FindVariableFeatures(object = sobj, nfeatures = 2000, verbose = FALSE, selection.method = 'vst')
+sobj <- ScaleData(sobj, verbose = FALSE)
+sobj <- RunPCA(sobj, npcs = 20, verbose = FALSE)
+sobj <- FindNeighbors(sobj, dims = 1:20, verbose = FALSE)
+sobj <- FindClusters(sobj, resolution = 0.5, verbose = FALSE)
+
+# Add soup group clustering
+sobj$soup_group <- sobj@meta.data[['seurat_clusters']]
+
+
+#Step 3: Correct Counts with SoupX
+make_soup <- function(sobj){
+  sample_id <- as.character(sobj$sample_id[1]) 
+  path <- paste0(sample_id, "/raw_feature_bc_matrix/")
+  raw <- Read10X(data.dir = path)
+  counts <- GetAssayData(sobj, slot = "counts")
+  common_genes <- intersect(rownames(raw), rownames(counts))
+  raw <- raw[common_genes, , drop = FALSE]
+  counts <- counts[common_genes, , drop = FALSE]
+  sc <- SoupChannel(tod = raw, toc = counts)
+  if (!"soup_group" %in% colnames(sobj@meta.data)) {
+    stop("Missing 'soup_group' column in metadata. Run clustering or assign group labels first.")
+  }
+  sc <- setClusters(sc, sobj$soup_group)
+  sc <- autoEstCont(sc, doPlot = FALSE)
+  out <- adjustCounts(sc, roundToInt = TRUE)
+  sobj[["original.counts"]] <- CreateAssayObject(counts = counts)
+  DefaultAssay(sobj) <- "RNA"
+  sobj[["RNA"]] <- CreateAssayObject(counts = out)
+  return(sobj)
+}
+
+# Run SoupX for ACC_S4
+sobj_ACC_S4 <- make_soup(sobj)
+
+
+run_umap <- function(sobj){
+  sobj <- NormalizeData(sobj, verbose = FALSE)
+  sobj <- FindVariableFeatures(sobj, nfeatures = 2000, verbose = FALSE)
+  sobj <- ScaleData(sobj, verbose = FALSE)
+  sobj <- RunPCA(sobj, verbose = FALSE)
+  sobj <- RunUMAP(sobj, dims = 1:20, verbose = FALSE)
+  sobj <- FindNeighbors(sobj, dims = 1:20, verbose = FALSE)
+  sobj <- FindClusters(sobj, resolution = 0.5, verbose = FALSE)
+  return(sobj)
+}
+
+# Run UMAP for ACC_S1
+sobj_ACC_S4 <- run_umap(sobj_ACC_S4)
+
+#Step 5: Create UMAP Plots and Save
+# For ACC_S4
+p <- DimPlot(sobj_ACC_S4, reduction = "umap", label = TRUE, group.by = "seurat_clusters") +
+  ggtitle("UMAP - ACC_S4")
+ggsave(filename = "UMAP_ACC_S4_YFP.png", plot = p, width = 6, height = 5, dpi = 300)
+
+#Step 6: Differential Expression Analysis
+markers_ACC_S4 <- FindAllMarkers(sobj_ACC_S4, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+write.csv(markers_ACC_S4, "DEG_ACC_S4_YFPclusters.csv", row.names = FALSE)
+
+# Step 7: Heatmap and Dot Plot Generation
+# Example for ACC_S1 (Top 10 DE genes)
+top_genes_ACC_S4 <- markers_ACC_S4 %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+# Generate heatmap for ACC_S1
+p_heatmap <- DoHeatmap(sobj_ACC_S4, features = top_genes_ACC_S4$gene, group.by = "seurat_clusters") +
+  ggtitle("Top 10 Differentially Expressed Genes per Cluster")
+ggsave("Heatmap_Top10_DEG_ACC_S4.png", plot = p_heatmap, width = 10, height = 10, dpi = 300)
+
+saveRDS(sobj_ACC_S4, file = "ACC_S4_YFP.rds")
