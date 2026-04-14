@@ -1,0 +1,380 @@
+
+
+library(tidyverse)
+library(data.table)
+library(EnhancedVolcano)
+library(readxl)
+
+#TPKTXTPMT bulk RNA-seq 
+Autor: Alinne C. Costa
+
+## ===== SETUP =====
+options(stringsAsFactors = FALSE)
+
+# Packages
+library(dplyr)
+library(readxl)
+library(pheatmap)
+
+# Helper
+num <- function(x) suppressWarnings(as.numeric(as.character(x)))
+
+## ===== YOUR INPUT FILE =====
+# TPKT × TPMT bulk RNA-seq
+deg_file  <- "/Users/S222553/Desktop/Olson Lab/TWIST2 project/Twist2-GEMM/From Akansha/Group8 (TPKT) vs. Group7 (TPMT).xlsx"
+deg_sheet <- "Group8.vs.Group7.res"   # change if your sheet name differs
+
+# Read table
+deg <- readxl::read_excel(deg_file, sheet = deg_sheet)
+
+## ===== OPTIONAL: STANDARDIZE COLUMN NAMES =====
+# Expected columns:
+#   id, log2FoldChange, padj, baseMean.Group7 (TPMT), baseMean.Group8 (TPKT)
+
+# Try to find/rename gene column to 'id' if needed
+if (!"id" %in% names(deg)) {
+  gene_candidates <- c("gene","Gene","GENE","GeneSymbol","symbol","Symbol","Geneid","GeneID")
+  hit <- intersect(gene_candidates, names(deg))
+  if (length(hit) == 1) {
+    deg <- dplyr::rename(deg, id = !!sym(hit))
+  }
+}
+
+# If your baseMean columns are named differently, rename here (uncomment & edit):
+# deg <- dplyr::rename(
+#   deg,
+#   `baseMean.Group7` = Mean_TPMT,  # <-- replace with your actual column name
+#   `baseMean.Group8` = Mean_TPKT   # <-- replace with your actual column name
+# )
+
+## ===== CUTS & OUTPUT FOLDER =====
+p_cut   <- 0.05
+lfc_cut <- 1
+
+# Save next to the input file, inside a new folder
+output_dir <- file.path(dirname(deg_file), "heatmaps_TPMT_TPKT")
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+## ===== PREPARE DATA FOR HEATMAP =====
+cat("Preparing heatmap data...\n")
+
+# Select top 10 up and down genes
+deg2 <- deg %>%
+  dplyr::mutate(
+    log2FC = num(log2FoldChange),
+    padj   = num(padj)
+  ) %>%
+  dplyr::filter(is.finite(log2FC) & is.finite(padj))
+
+# Top upregulated genes (TPKT)
+top_up <- deg2 %>% 
+  dplyr::filter(padj < p_cut & log2FC >= lfc_cut) %>%   # CHANGED: & and dplyr::
+  dplyr::arrange(dplyr::desc(log2FC)) %>%               # CHANGED
+  dplyr::slice_head(n = 10)
+
+# Top downregulated genes (TPKT)
+top_down <- deg2 %>% 
+  dplyr::filter(padj < p_cut & log2FC <= -lfc_cut) %>%  # CHANGED: & and dplyr::
+  dplyr::arrange(log2FC) %>% 
+  dplyr::slice_head(n = 10)
+
+# 'id' must be your gene identifier column
+top_genes <- c(top_down$id, top_up$id)
+
+cat("Top 10 downregulated genes found:", nrow(top_down), "\n")
+cat("Top 10 upregulated genes found:",   nrow(top_up),   "\n")
+
+## ===== CREATING HEATMAP =====
+cat("\n===== CREATING HEATMAP =====\n")
+
+# STEP 1: Extract baseMean values for top genes
+cat("Step 1: Extracting baseMean values for", length(top_genes), "genes\n")
+heatmap_data <- deg[deg$id %in% top_genes, ]
+
+# STEP 2: Create a matrix with TPMT (Group7) and TPKT (Group8) columns
+cat("Step 2: Building expression matrix\n")
+tpmt_values <- num(heatmap_data$`baseMean.Group7`)
+tpkt_values <- num(heatmap_data$`baseMean.Group8`)
+gene_names  <- heatmap_data$id
+
+# Combine into matrix
+mat <- cbind(TPMT = tpmt_values, TPKT = tpkt_values)
+rownames(mat) <- gene_names
+
+# STEP 3: Reorder rows to match top_genes order (down first, then up)
+cat("Step 3: Ordering genes (downregulated first, then upregulated)\n")
+genes_in_order <- top_genes[top_genes %in% rownames(mat)]
+mat <- mat[genes_in_order, , drop = FALSE]
+cat("  Final gene count:", nrow(mat), "\n")
+
+# STEP 4: Log2 transform
+cat("Step 4: Log2 transforming baseMean values\n")
+mat_log <- log2(mat + 1)
+
+# STEP 5: Z-score normalization (within each column/group)
+cat("Step 5: Z-score normalization within each group\n")
+mat_z <- scale(mat_log)
+mat_z[is.na(mat_z)] <- 0
+cat("  Z-score range: [", round(min(mat_z), 2), ",", round(max(mat_z), 2), "]\n")
+
+# STEP 6: Create row annotations
+cat("Step 6: Creating gene annotations\n")
+gene_direction <- rep("Up in TPMT", nrow(mat_z))
+gene_direction[rownames(mat_z) %in% top_up$id] <- "Up in TPKT"
+
+row_anno <- data.frame(
+  Direction = gene_direction,
+  row.names = rownames(mat_z)
+)
+
+# STEP 7: Define color scheme
+cat("Step 7: Setting up color schemes\n")
+ann_colors <- list(
+  Direction = c(
+    "Up in TPKT" = "#D73027",
+    "Up in TPMT" = "#4575B4"
+  )
+)
+heatmap_colors  <- colorRampPalette(c("blue", "white", "red"))(100)
+
+# STEP 8: Generate and save z-scored heatmap (PNG)
+cat("Step 8: Generating z-scored heatmap (PNG)\n")
+png(
+  filename = file.path(output_dir, "heatmap_top_genes_zscore.png"),
+  width = 6, height = 10, units = "in", res = 300
+)
+pheatmap(
+  mat_z,
+  annotation_row   = row_anno,
+  annotation_colors= ann_colors,
+  cluster_rows     = FALSE,
+  cluster_cols     = FALSE,
+  show_colnames    = TRUE,
+  show_rownames    = TRUE,
+  fontsize_row     = 10,
+  fontsize_col     = 10,
+  cellwidth        = 80,
+  cellheight       = 15,
+  color            = heatmap_colors,
+  main             = "Top 10 up/down — TPMT vs TPKT\n(z-scored log2 baseMean per group)",
+  border_color     = NA
+)
+dev.off()
+cat("  Saved: heatmap_top_genes_zscore.png\n")
+
+# STEP 9: Generate and save z-scored heatmap (PDF)
+cat("Step 9: Generating z-scored heatmap (PDF)\n")
+pdf(
+  file = file.path(output_dir, "heatmap_top_genes_zscore.pdf"),
+  width = 6, height = 10
+)
+pheatmap(
+  mat_z,
+  annotation_row   = row_anno,
+  annotation_colors= ann_colors,
+  cluster_rows     = FALSE,
+  cluster_cols     = FALSE,
+  show_colnames    = TRUE,
+  show_rownames    = TRUE,
+  fontsize_row     = 10,
+  fontsize_col     = 10,
+  cellwidth        = 80,
+  cellheight       = 15,
+  color            = heatmap_colors,
+  main             = "Top 10 up/down — TPMT vs TPKT\n(z-scored log2 baseMean per group)",
+  border_color     = NA
+)
+dev.off()
+cat("  Saved: heatmap_top_genes_zscore.pdf\n")
+
+
+
+## ===== FULL HEATMAP: ALL DEGs (2 groups) =====
+cat("\n===== FULL HEATMAP: ALL DEGs =====\n")
+
+# 1) Select all DEGs by your cutoffs
+all_deg <- deg2 %>%
+  dplyr::filter(padj < p_cut, abs(log2FC) >= lfc_cut)
+
+# Separate IDs by direction so we can order rows: Down first, then Up
+down_ids <- all_deg %>% dplyr::filter(log2FC <= -lfc_cut) %>% dplyr::arrange(log2FC)        %>% dplyr::pull(id)
+up_ids   <- all_deg %>% dplyr::filter(log2FC >=  lfc_cut) %>% dplyr::arrange(dplyr::desc(log2FC)) %>% dplyr::pull(id)
+all_ids  <- unique(c(down_ids, up_ids))
+
+cat("  Total DEGs:", length(all_ids), "\n")
+
+# 2) Build 2-column matrix (TPMT = Group7, TPKT = Group8)
+hm <- deg[deg$id %in% all_ids, , drop = FALSE]
+mat <- cbind(
+  TPMT = num(hm$`baseMean.Group7`),
+  TPKT = num(hm$`baseMean.Group8`)
+)
+rownames(mat) <- hm$id
+
+# keep order: Down first, then Up
+order_ids <- c(intersect(down_ids, rownames(mat)), intersect(up_ids, rownames(mat)))
+mat <- mat[order_ids, , drop = FALSE]
+
+# Log-transform
+mat_log <- log2(mat + 1)
+
+# Z-score by gene (row), not by column
+mat_z <- t(scale(t(mat_log)))
+mat_z[is.na(mat_z)] <- 0
+
+# 4) Row annotation (direction)
+row_anno <- data.frame(
+  Direction = ifelse(rownames(mat_z) %in% up_ids, "Up in TPKT", "Up in TPMT"),
+  row.names = rownames(mat_z)
+)
+
+# 5) Colors
+ann_colors <- list(Direction = c("Up in TPKT" = "#D73027", "Up in TPMT" = "#4575B4"))
+heatmap_colors <- colorRampPalette(c("blue", "white", "red"))(100)
+
+# 6) Save PNG
+png(
+  filename = file.path(output_dir, "heatmap_ALL_DEGs_zscore.png"),
+  width = 6, height = max(8, min(30, 0.18 * nrow(mat_z))),  # auto height
+  units = "in", res = 300
+)
+pheatmap(
+  mat_z,
+  annotation_row    = row_anno,
+  annotation_colors = ann_colors,
+  cluster_rows      = FALSE,
+  cluster_cols      = FALSE,
+  show_colnames     = TRUE,
+  show_rownames     = nrow(mat_z) <= 80,  # hide names if very long
+  fontsize_row      = 8,
+  fontsize_col      = 10,
+  cellwidth         = 80,
+  cellheight        = 10,
+  color             = heatmap_colors,
+  main              = sprintf("ALL DEGs — TPMT vs TPKT (n=%d)\n(z-scored log2 baseMean per group)", nrow(mat_z)),
+  border_color      = NA
+)
+dev.off()
+cat("  Saved: heatmap_ALL_DEGs_zscore.png\n")
+
+# 7) Save PDF
+pdf(
+  file = file.path(output_dir, "heatmap_ALL_DEGs_zscore.pdf"),
+  width = 6, height = max(8, min(30, 0.18 * nrow(mat_z)))
+)
+pheatmap(
+  mat_z,
+  annotation_row    = row_anno,
+  annotation_colors = ann_colors,
+  cluster_rows      = FALSE,
+  cluster_cols      = FALSE,
+  show_colnames     = TRUE,
+  show_rownames     = nrow(mat_z) <= 80,
+  fontsize_row      = 8,
+  fontsize_col      = 10,
+  cellwidth         = 80,
+  cellheight        = 10,
+  color             = heatmap_colors,
+  main              = sprintf("ALL DEGs — TPMT vs TPKT (n=%d)\n(z-scored log2 baseMean per group)", nrow(mat_z)),
+  border_color      = NA
+)
+dev.off()
+cat("  Saved: heatmap_ALL_DEGs_zscore.pdf\n")
+
+## ===== How many DEGs are up/down in Group 8? =====
+# Up in Group 8 (TPKT): padj < p_cut AND log2FC >= lfc_cut
+n_up_g8 <- deg2 %>%
+  dplyr::filter(padj < p_cut, log2FC >= lfc_cut) %>%
+  nrow()
+
+# Down in Group 8 (TPKT): padj < p_cut AND log2FC <= -lfc_cut
+n_down_g8 <- deg2 %>%
+  dplyr::filter(padj < p_cut, log2FC <= -lfc_cut) %>%
+  nrow()
+
+# Total significant DEGs at these cutoffs
+n_total_deg <- deg2 %>%
+  dplyr::filter(padj < p_cut, abs(log2FC) >= lfc_cut) %>%
+  nrow()
+
+cat("Up in Group 8:", n_up_g8, "\n")
+cat("Down in Group 8:", n_down_g8, "\n")
+cat("Total DEGs:", n_total_deg, "\n")
+
+genes_up_g8 <- deg2 %>% dplyr::filter(padj < p_cut, log2FC >=  lfc_cut) %>% dplyr::pull(id)
+genes_dn_g8 <- deg2 %>% dplyr::filter(padj < p_cut, log2FC <= -lfc_cut) %>% dplyr::pull(id)
+
+summary_tbl <- tibble::tibble(
+  Direction = c("Up in Group 8", "Down in Group 8", "Total DEGs"),
+  Count     = c(length(genes_up_g8), length(genes_dn_g8), n_total_deg)
+)
+print(summary_tbl)
+
+# Optional: save
+write.csv(summary_tbl, file.path(output_dir, "DEG_counts_group8.csv"), row.names = FALSE)
+write.csv(data.frame(gene=genes_up_g8), file.path(output_dir, "genes_up_in_group8.csv"), row.names = FALSE)
+write.csv(data.frame(gene=genes_dn_g8), file.path(output_dir, "genes_down_in_group8.csv"), row.names = FALSE)
+
+
+## ===== VOLCANO (classic style like your template) =====
+library(ggplot2)
+library(ggrepel)
+
+# Build a data frame in the same "shape" as your template
+deg_results <- deg2 %>%
+  dplyr::mutate(
+    avg_log2FC = log2FC,                                # x
+    log10_padj = -log10(pmax(padj, .Machine$double.xmin)), # y (positive)
+    gene       = id,
+    deg_category = dplyr::case_when(
+      padj < p_cut & log2FC >=  lfc_cut ~ "up",    # up in TPKT (Group 8)
+      padj < p_cut & log2FC <= -lfc_cut ~ "down",  # up in TPMT (Group 7)
+      TRUE                                         ~ "ns"
+    )
+  )
+
+# Label only the top 10 most significant DEGs (lowest padj)
+lab_data <- deg_results %>%
+  dplyr::filter(deg_category != "ns") %>%
+  dplyr::arrange(padj) %>%
+  dplyr::slice_head(n = 20)
+
+
+volcano_plot <- ggplot(deg_results, aes(x = avg_log2FC, y = log10_padj)) +
+  geom_point(aes(color = deg_category), alpha = 0.7, size = 1.2, na.rm = TRUE) +
+  geom_text_repel(
+    data = lab_data,
+    aes(label = gene),
+    size = 3,
+    segment.color = NA,     # no leader lines (matches your look)
+    max.overlaps = 20,      # keep it readable
+    na.rm = TRUE
+  ) +
+  scale_color_manual(values = c("up" = "red", "down" = "blue", "ns" = "grey")) +
+  geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(p_cut),        linetype = "dashed", color = "black") +
+  labs(
+    x = "Log2 Fold Change",
+    y = "-Log10 Adjusted p-value",
+    color = "DEG Category",
+    title = "Volcano plot — TPMT vs TPKT"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    plot.title   = element_text(face = "bold")
+  )
+
+# Save (ensure the folder exists)
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+png(file.path(output_dir, "volcano_TPMT_vs_TPKT_classic.png"),
+    width = 7, height = 6, units = "in", res = 300)
+print(volcano_plot)
+dev.off()
+
+pdf(file.path(output_dir, "volcano_TPMT_vs_TPKT_classic.pdf"),
+    width = 7, height = 6)
+print(volcano_plot)
+dev.off()
+cat("  Saved: volcano_TPMT_vs_TPKT_classic.png/pdf\n")
