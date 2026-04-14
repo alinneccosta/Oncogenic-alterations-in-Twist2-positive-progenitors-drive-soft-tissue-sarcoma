@@ -1,0 +1,364 @@
+# CYTOTRACE2 ANALYSIS SCRIPT
+# Author: Runzhe Xu, analyzed by Alinne C. Costa 
+# Generates developmental pontency scores for all tumor subseted cell clusters
+# Date: 2025
+
+# Load required libraries
+library(Seurat)
+library(CytoTRACE2)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(tidyr)
+library(tools)
+
+
+
+# CHANGE THESE PATHS FOR YOUR DATASET:
+input_file <- '/Users/S222553/Desktop/Olson Lab/TWIST2 project/Twist2-GEMM/Multiome/MGM analysis /TSMT/Tumor cells/TSMT_tumor_cells.rds'
+output_base_dir <- "/Users/S222553/Desktop/Olson Lab/TWIST2 project/Twist2-GEMM/Multiome/MGM analysis /TSMT/Tumor cells/Cytotrace/TSMT_cytotrace2"
+analysis_name <- "TSMT_cytotrace2_analysis"
+
+# Set up output directories
+current_date <- format(Sys.Date(), "%Y%m%d")
+results_dir <- file.path(output_base_dir, paste0(analysis_name, "_", current_date))
+figures_dir <- file.path(results_dir, "figures")
+cytotrace2_dir <- file.path(results_dir, "cytotrace2_results")
+
+# Create directories
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figures_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(cytotrace2_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("Input file:", input_file, "\n")
+cat("Results will be saved to:", results_dir, "\n")
+cat("Figures will be saved to:", figures_dir, "\n")
+
+# =====================================================
+# DATA LOADING
+# =====================================================
+
+cat("\n=== Loading Data ===\n")
+seurat_obj <- readRDS(input_file)
+
+#DEFINE SEURAT OBJECT AUTOMATICALY# 
+#seurat_obj <- TSMT_tumor_cells
+
+# Check data status
+cat("Seurat object dimensions:", dim(seurat_obj), "\n")
+cat("Available assays:", names(seurat_obj@assays), "\n")
+cat("Available reductions:", names(seurat_obj@reductions), "\n")
+cat("Current active identity:", class(seurat_obj@active.ident), "\n")
+
+# Store original cell types
+if (!"subclass" %in% colnames(seurat_obj@meta.data)) {
+  seurat_obj$subclass <- seurat_obj@active.ident
+}
+
+cat("Cell types (subclass):", names(table(seurat_obj$subclass)), "\n")
+
+# Set default assay to RNA for CytoTRACE2
+DefaultAssay(seurat_obj) <- "RNA"
+
+# =====================================================
+# CYTOTRACE2 ANALYSIS
+# =====================================================
+
+cat("\n=== Running CytoTRACE2 Analysis ===\n")
+
+# Run CytoTRACE2 on Seurat object (mouse data)
+cat("Running CytoTRACE2 with mouse species settings and ncores=2...\n")
+
+cytotrace2_result <- cytotrace2(seurat_obj, 
+                                is_seurat = TRUE, 
+                                slot_type = "counts",  # Use counts slot
+                                species = "mouse",     # Mouse data
+                                ncores = 2)            # Use 2 cores
+
+cat("CytoTRACE2 analysis completed successfully.\n")
+
+# Save CytoTRACE2 results
+saveRDS(cytotrace2_result, file.path(cytotrace2_dir, "cytotrace2_results.rds"))
+
+# Add CytoTRACE2 results to the original seurat object
+cat("Adding CytoTRACE2 results to original Seurat object...\n")
+# Extract CytoTRACE2 scores and add to metadata
+seurat_obj$CytoTRACE2_Score <- cytotrace2_result$CytoTRACE2_Score
+seurat_obj$CytoTRACE2_Relative <- cytotrace2_result$CytoTRACE2_Relative
+seurat_obj$CytoTRACE2_Potency <- cytotrace2_result$CytoTRACE2_Potency
+
+cat("CytoTRACE2 scores successfully added to Seurat object metadata.\n")
+
+# =====================================================
+# INDIVIDUAL CYTOTRACE2 PLOTS
+# =====================================================
+
+cat("\n=== Creating Individual CytoTRACE2 Plots ===\n")
+
+# 1. CytoTRACE2 Score UMAP
+cat("Creating CytoTRACE2 Score UMAP...\n")
+p_cytotrace2_score <- FeaturePlot(seurat_obj, 
+                                  features = "CytoTRACE2_Score", 
+                                  reduction = "umap", 
+                                  pt.size = 0.3) +
+  scale_color_viridis_c() +  scale_x_reverse() +
+  ggtitle("CytoTRACE2 Potency Score") +
+  theme_minimal()
+
+# Save and display
+ggsave(file.path(cytotrace2_dir, "cytotrace2_score_umap.pdf"), 
+       p_cytotrace2_score, width = 8, height = 6)
+print(p_cytotrace2_score)
+
+# 2. CytoTRACE2 Relative Order UMAP
+cat("Creating CytoTRACE2 Relative Order UMAP...\n")
+p_cytotrace2_relative <- FeaturePlot(seurat_obj, 
+                                     features = "CytoTRACE2_Relative", 
+                                     reduction = "umap", 
+                                     pt.size = 0.3) +
+  scale_color_viridis_c() +
+  ggtitle("CytoTRACE2 Relative Order") +
+  theme_minimal()
+p_cytotrace2_relative
+# Save and display
+ggsave(file.path(cytotrace2_dir, "cytotrace2_relative_umap.pdf"), 
+       p_cytotrace2_relative, width = 8, height = 6)
+print(p_cytotrace2_relative)
+
+# 3. CytoTRACE2 Potency Categories UMAP
+cat("Creating CytoTRACE2 Potency Categories UMAP...\n")
+p_cytotrace2_potency <- DimPlot(seurat_obj, 
+                                group.by = "CytoTRACE2_Potency", 
+                                reduction = "umap", 
+                                pt.size = 0.3) +
+  ggtitle("CytoTRACE2 Potency Categories") +
+  theme_minimal()
+
+# Save and display
+ggsave(file.path(cytotrace2_dir, "cytotrace2_potency_categories_umap.pdf"), 
+       p_cytotrace2_potency, width = 8, height = 6)
+print(p_cytotrace2_potency)
+
+# 4. Cell Types/Subclass UMAP
+cat("Creating Cell Types UMAP...\n")
+p_subclass <- DimPlot(seurat_obj, 
+                      group.by = "subclass", 
+                      reduction = "umap", 
+                      pt.size = 0.3,
+                      label = TRUE) +
+  ggtitle("Cell Types (Subclass)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Save and display
+ggsave(file.path(cytotrace2_dir, "cell_types_umap.pdf"), 
+       p_subclass, width = 8, height = 6)
+print(p_subclass)
+
+# 5. Clusters UMAP (if available)
+cluster_col <- ifelse("final_clusters" %in% colnames(seurat_obj@meta.data), 
+                      "final_clusters", "seurat_clusters")
+
+if (cluster_col %in% colnames(seurat_obj@meta.data)) {
+  cat("Creating Clusters UMAP...\n")
+  p_clusters <- DimPlot(seurat_obj, 
+                        group.by = cluster_col, 
+                        reduction = "umap", 
+                        pt.size = 0.3,
+                        label = TRUE) +
+    ggtitle("Clusters") +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  # Save and display
+  ggsave(file.path(cytotrace2_dir, "clusters_umap.pdf"), 
+         p_clusters, width = 8, height = 6)
+  print(p_clusters)
+}
+
+# 6. CytoTRACE2 Score Boxplot by Cell Type
+cat("Creating CytoTRACE2 Score Boxplot by Cell Type...\n")
+p_boxplot_subclass <- ggplot(seurat_obj@meta.data, 
+                             aes(x = subclass, y = CytoTRACE2_Score, fill = subclass)) +
+  geom_boxplot(alpha = 0.7) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(title = "CytoTRACE2 Scores by Cell Type",
+       x = "Cell Type (Subclass)",
+       y = "CytoTRACE2 Score")
+
+# Save and display
+ggsave(file.path(cytotrace2_dir, "cytotrace2_boxplot_by_celltype.pdf"), 
+       p_boxplot_subclass, width = 10, height = 6)
+print(p_boxplot_subclass)
+
+# 7. CytoTRACE2 Score Boxplot by Cluster (if available)
+if (cluster_col %in% colnames(seurat_obj@meta.data)) {
+  cat("Creating CytoTRACE2 Score Boxplot by Cluster...\n")
+  p_boxplot_cluster <- ggplot(seurat_obj@meta.data, 
+                              aes_string(x = cluster_col, y = "CytoTRACE2_Score", fill = cluster_col)) +
+    geom_boxplot(alpha = 0.7) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none") +
+    labs(title = "CytoTRACE2 Scores by Cluster",
+         x = "Cluster",
+         y = "CytoTRACE2 Score")
+  
+  # Save and display
+  ggsave(file.path(cytotrace2_dir, "cytotrace2_boxplot_by_cluster.pdf"), 
+         p_boxplot_cluster, width = 10, height = 6)
+  print(p_boxplot_cluster)
+}
+
+# 8. Combined Overview Plot
+cat("Creating Combined Overview Plot...\n")
+p_combined <- (p_subclass | p_cytotrace2_score) / 
+  (p_cytotrace2_potency | p_cytotrace2_relative)
+
+# Save and display
+ggsave(file.path(figures_dir, "cytotrace2_combined_overview.pdf"), 
+       p_combined, width = 16, height = 12)
+print(p_combined)
+
+# =====================================================
+# SUMMARY STATISTICS
+# =====================================================
+
+cat("\n=== Creating Summary Statistics ===\n")
+
+# Summary statistics by cell type
+summary_stats <- seurat_obj@meta.data %>%
+  group_by(subclass) %>%
+  summarise(
+    n_cells = length(subclass),
+    mean_cytotrace2 = round(mean(CytoTRACE2_Score, na.rm = TRUE), 4),
+    median_cytotrace2 = round(median(CytoTRACE2_Score, na.rm = TRUE), 4),
+    sd_cytotrace2 = round(sd(CytoTRACE2_Score, na.rm = TRUE), 4),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_cytotrace2))
+
+write.csv(summary_stats, file.path(results_dir, "cytotrace2_summary_by_celltype.csv"), row.names = FALSE)
+
+cat("CytoTRACE2 Summary by Cell Type:\n")
+print(summary_stats)
+
+# Potency category distribution
+if ("CytoTRACE2_Potency" %in% colnames(seurat_obj@meta.data)) {
+  potency_dist <- table(seurat_obj$CytoTRACE2_Potency)
+  cat("\nPotency Category Distribution:\n")
+  print(potency_dist)
+  
+  potency_by_celltype <- table(seurat_obj$subclass, seurat_obj$CytoTRACE2_Potency)
+  cat("\nPotency Categories by Cell Type:\n")
+  print(potency_by_celltype)
+  
+  write.csv(potency_by_celltype, file.path(results_dir, "potency_categories_by_celltype.csv"))
+}
+
+
+
+# =====================================================
+# SAVE FINAL RESULTS
+# =====================================================
+
+cat("\n=== Saving Final Results ===\n")
+
+# Create output filename with "_cytotrace2" suffix in the same directory as input
+input_dir <- dirname(input_file)
+input_basename <- tools::file_path_sans_ext(basename(input_file))
+output_filename <- paste0(input_basename, "_cytotrace2.rds")
+output_path <- file.path(input_dir, output_filename)
+
+# Save the final object with CytoTRACE2 results to main path
+saveRDS(seurat_obj, output_path)
+cat("Seurat object with CytoTRACE2 results saved to:", output_path, "\n")
+
+# Also save to results directory for backup
+saveRDS(seurat_obj, file.path(results_dir, "seurat_object_with_cytotrace2.rds"))
+
+# Save metadata
+write.csv(seurat_obj@meta.data, file.path(results_dir, "metadata_with_cytotrace2.csv"))
+
+# =====================================================
+# FINAL SUMMARY
+# =====================================================
+
+cat("\n=== ANALYSIS COMPLETE ===\n")
+cat(sprintf("Total cells analyzed: %d\n", ncol(seurat_obj)))
+cat(sprintf("Cell types: %s\n", paste(names(table(seurat_obj$subclass)), collapse = ", ")))
+cat("CytoTRACE2: Successfully completed\n")
+
+if ("CytoTRACE2_Potency" %in% colnames(seurat_obj@meta.data)) {
+  potency_categories <- table(seurat_obj$CytoTRACE2_Potency)
+  cat("Potency categories:\n")
+  print(potency_categories)
+}
+
+
+# DEFAULT CYTOTRACE2 PACKAGE PLOTS
+
+# Extract annotation data using active identity
+annotation <- data.frame(
+  phenotype = seurat_obj@active.ident,
+  row.names = colnames(seurat_obj)
+)
+
+cat("Annotation created with", nrow(annotation), "cells and phenotypes:", paste(unique(annotation$phenotype), collapse = ", "), "\n")
+
+# Extract expression data
+expression_data <- as.matrix(seurat_obj@assays$RNA@data)
+
+cat("Expression data extracted with dimensions:", dim(expression_data), "\n")
+
+# Generate prediction and phenotype association plots with plotData function
+cat("Running plotData function...\n")
+plots <- plotData(cytotrace2_result = cytotrace2_result,
+                  annotation = annotation,
+                  expression_data = expression_data,
+                  is_seurat = TRUE)
+
+cat("plotData completed successfully.\n")
+
+# Save and display individual default plots
+
+# 1. CytoTRACE2_UMAP
+cat("Saving CytoTRACE2_UMAP...\n")
+ggsave(file.path(cytotrace2_dir, "default_cytotrace2_umap.pdf"),
+       plots$CytoTRACE2_UMAP, width = 8, height = 6 )
+print(plots$CytoTRACE2_UMAP)
+
+# 2. CytoTRACE2_Boxplot_byPheno
+cat("Saving CytoTRACE2_Boxplot_byPheno...\n")
+ggsave(file.path(cytotrace2_dir, "default_cytotrace2_boxplot_by_phenotype.pdf"),
+       plots$CytoTRACE2_Boxplot_byPheno, width = 10, height = 6)
+print(plots$CytoTRACE2_Boxplot_byPheno)
+
+# 3. CytoTRACE2_Potency_UMAP
+cat("Saving CytoTRACE2_Potency_UMAP...\n")
+ggsave(file.path(cytotrace2_dir, "default_cytotrace2_potency_umap.pdf"),
+       plots$CytoTRACE2_Potency_UMAP, width = 8, height = 6)
+print(plots$CytoTRACE2_Potency_UMAP)
+
+# 4. CytoTRACE2_Relative_UMAP
+cat("Saving CytoTRACE2_Relative_UMAP...\n")
+ggsave(file.path(cytotrace2_dir, "default_cytotrace2_relative_umap.pdf"),
+       plots$CytoTRACE2_Relative_UMAP, width = 8, height = 6)
+print(plots$CytoTRACE2_Relative_UMAP)
+
+# 5. Phenotype_UMAP
+cat("Saving Phenotype_UMAP...\n")
+ggsave(file.path(cytotrace2_dir, "default_phenotype_umap.pdf"),
+       plots$Phenotype_UMAP, width = 8, height = 6)
+print(plots$Phenotype_UMAP)
+
+# Create combined default plots overview
+cat("Creating combined default plots overview...\n")
+default_combined <- (plots$Phenotype_UMAP | plots$CytoTRACE2_UMAP) /
+  (plots$CytoTRACE2_Potency_UMAP | plots$CytoTRACE2_Relative_UMAP)
+
+ggsave(file.path(figures_dir, "default_cytotrace2_combined_plots.pdf"),
+       default_combined, width = 16, height = 12)
+print(default_combined)
