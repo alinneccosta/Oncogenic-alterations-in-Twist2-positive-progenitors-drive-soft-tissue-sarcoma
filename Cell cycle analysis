@@ -1,0 +1,88 @@
+#cell cycle score
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+
+# Connect to Ensembl
+human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://may2021.archive.ensembl.org")
+mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://may2021.archive.ensembl.org")
+
+
+#Convert genes to mouse
+s.mapping <- getLDS(
+  attributes = "hgnc_symbol", filters = "hgnc_symbol",
+  values = s.genes, mart = human,
+  attributesL = "mgi_symbol", martL = mouse,
+  uniqueRows = TRUE
+)
+s.mouse <- unique(s.mapping$MGI.symbol)
+
+g2m.mapping <- getLDS(
+  attributes = "hgnc_symbol", filters = "hgnc_symbol",
+  values = g2m.genes, mart = human,
+  attributesL = "mgi_symbol", martL = mouse,
+  uniqueRows = TRUE
+)
+g2m.mouse <- unique(g2m.mapping$MGI.symbol)
+
+TSMT_tumor_cells <- CellCycleScoring(
+  TSMT_tumor_cells,
+  s.features = s.mouse,
+  g2m.features = g2m.mouse,
+  set.ident = TRUE
+)
+
+DimPlot(TSMT_tumor_cells, reduction = "umap", group.by = "Phase", label = FALSE) +
+  ggtitle("Cell Cycle Phase")  
+
+#combined S anf G2M
+TSMT_tumor_cells$CyclingPhase <- ifelse(TSMT_tumor_cells$Phase %in% c("S", "G2M"), "Cycling", "G1")
+
+DimPlot(TSMT_tumor_cells, group.by = "CyclingPhase", reduction = "umap", cols = c("G1" = "#D9D9D9", "Cycling" = "#595959")
+) + ggtitle("Cycling (S + G2M) vs G1")
+
+#proportion
+# 1. Create CyclingPhase (Cycling vs G1) from Phase (G1/S/G2M)
+TSMT_tumor_cells$CyclingPhase <- ifelse(
+  TSMT_tumor_cells$Phase %in% c("S", "G2M"),
+  "Cycling",
+  "G1"
+)
+
+# 2. Table: Cluster x Phase (G1 vs Cycling)
+table_by_cluster <- table(
+  Cluster = Idents(TSMT_tumor_cells),
+  Phase   = TSMT_tumor_cells$CyclingPhase
+)
+
+# Raw counts per cluster
+print(table_by_cluster)
+
+# 3. Percentages within each cluster (row-wise)
+prop_by_cluster <- prop.table(table_by_cluster, margin = 1) * 100
+prop_by_cluster <- round(prop_by_cluster, 1)
+print(prop_by_cluster)
+
+# 4. Extract "how many cycling cells" per cluster
+cycling_counts <- table_by_cluster[, "Cycling"]
+cycling_counts   # this is what you asked for
+
+# 5. Optional: make a nice summary data frame
+cycling_df <- data.frame(
+  cluster         = rownames(table_by_cluster),
+  cycling_cells   = table_by_cluster[, "Cycling"],
+  total_cells     = rowSums(table_by_cluster)
+)
+
+cycling_df$percent_cycling <- round(
+  100 * cycling_df$cycling_cells / cycling_df$total_cells,
+  1
+)
+
+cycling_df
+
+prop_df <- as.data.frame(prop_by_cluster)
+
+write_xlsx(prop_df, path = "/Users/S222553/Desktop/Olson Lab/TWIST2 project/Twist2-GEMM/Multiome/MGM analysis /TSMT/Tumor cells/TSMT_cycling.xlsx")
